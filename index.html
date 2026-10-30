@@ -1,0 +1,842 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>리야샘의 Voca Sense</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://cdn.sheetjs.com/xlsx-0.20.3/package/dist/xlsx.full.min.js"></script>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+KR:wght@400;500;600;700&family=Pretendard:wght@400;500;600;700&display=swap" rel="stylesheet" />
+  <style>
+    :root {
+      --primary: #4f46e5;
+      --primary-hover: #4338ca;
+      --bg: #f8fafc;
+      --text: #1e293b;
+      --muted: #64748b;
+      --font-scale: 1;
+      --font-family: 'Pretendard', 'Noto Sans KR', system-ui, sans-serif;
+    }
+    body {
+      font-family: var(--font-family);
+      background: var(--bg);
+      color: var(--text);
+      font-size: calc(16px * var(--font-scale));
+      min-height: 100vh;
+    }
+    .card {
+      background: #fff;
+      border: 1px solid #e2e8f0;
+      border-radius: 1rem;
+      box-shadow: 0 1px 2px rgba(0,0,0,.04);
+    }
+    .btn {
+      border: none;
+      border-radius: .75rem;
+      padding: .55rem 1rem;
+      font-weight: 500;
+      cursor: pointer;
+      transition: .15s;
+    }
+    .btn:active { transform: scale(.98); }
+    .btn-primary { background: var(--primary); color: #fff; }
+    .btn-primary:hover { background: var(--primary-hover); }
+    .btn-secondary { background: #f1f5f9; color: #334155; }
+    .btn-secondary:hover { background: #e2e8f0; }
+    .btn-success { background: #059669; color: #fff; }
+    .btn-danger { background: #ef4444; color: #fff; }
+    .input {
+      width: 100%;
+      border: 1px solid #cbd5e1;
+      border-radius: .75rem;
+      padding: .5rem .75rem;
+      outline: none;
+      background: #fff;
+    }
+    .input:focus {
+      border-color: var(--primary);
+      box-shadow: 0 0 0 3px color-mix(in srgb, var(--primary) 20%, transparent);
+    }
+    .label { display:block; font-size:.875rem; font-weight:500; color:var(--muted); margin-bottom:.25rem; }
+    .badge {
+      display:inline-block; font-size:.75rem; font-weight:500;
+      padding:.1rem .5rem; border-radius:9999px;
+      background: color-mix(in srgb, var(--primary) 12%, white);
+      color: var(--primary);
+    }
+    .opt {
+      text-align:left; width:100%;
+      border:2px solid #e2e8f0; border-radius:.75rem;
+      padding:.75rem 1rem; background:#fff; cursor:pointer;
+    }
+    .opt:hover { border-color: var(--primary); }
+    .opt.on {
+      border-color: var(--primary);
+      background: color-mix(in srgb, var(--primary) 12%, white);
+    }
+  </style>
+</head>
+<body>
+  <div id="app" class="max-w-3xl mx-auto px-4 py-6"></div>
+
+  <script>
+    const KEYS = {
+      words: 'vs_words',
+      pw: 'vs_pw',
+      theme: 'vs_theme',
+      results: 'vs_results'
+    };
+
+    let S = {
+      view: 'home', // home | teacher | student | quiz | result | settings | results
+      words: [],    // {id, unit, en, pos, ko, sentence}
+      quiz: null,
+      qi: 0,
+      answers: [],
+      name: '',
+      result: null,
+      results: {},
+      unitFilter: '전체',
+      theme: { primary: '#4f46e5', bg: '#f8fafc', fontScale: 1, fontFamily: 'pretendard' },
+      pw: 'teacher',
+      busy: false
+    };
+
+    const FONTS = {
+      pretendard: "'Pretendard','Noto Sans KR',system-ui,sans-serif",
+      noto: "'Noto Sans KR',sans-serif",
+      system: "system-ui,-apple-system,sans-serif"
+    };
+
+    // ---------- utils ----------
+    const uid = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
+    const esc = (s) => String(s ?? '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+    const cell = (v) => String(v ?? '').trim();
+    const norm = (s) => String(s ?? '').trim().toLowerCase().replace(/\s+/g, ' ');
+    const shuffle = (arr) => {
+      const a = arr.slice();
+      for (let i = a.length - 1; i > 0; i--) {
+        const j = Math.floor(Math.random() * (i + 1));
+        [a[i], a[j]] = [a[j], a[i]];
+      }
+      return a;
+    };
+    const encode = (o) => btoa(unescape(encodeURIComponent(JSON.stringify(o))));
+    const decode = (s) => {
+      try { return JSON.parse(decodeURIComponent(escape(atob(s)))); }
+      catch { return null; }
+    };
+
+    // 한글 뜻 여러 개: ; / | , 로 구분. 전부 써야 정답(순서 무관)
+    function splitMeanings(s) {
+      return norm(s).split(/[;|/，,]/).map(x => x.trim()).filter(Boolean);
+    }
+    function meaningsMatch(userStr, correctStr) {
+      const need = splitMeanings(correctStr).sort();
+      const got = splitMeanings(userStr).sort();
+      if (!need.length) return norm(userStr) === norm(correctStr);
+      if (need.length !== got.length) return false;
+      return need.every((m, i) => m === got[i]);
+    }
+
+    function load() {
+      try { S.words = JSON.parse(localStorage.getItem(KEYS.words) || '[]'); } catch { S.words = []; }
+      S.pw = localStorage.getItem(KEYS.pw) || 'teacher';
+      try {
+        const t = JSON.parse(localStorage.getItem(KEYS.theme) || 'null');
+        if (t) S.theme = { ...S.theme, ...t };
+      } catch {}
+      try { S.results = JSON.parse(localStorage.getItem(KEYS.results) || '{}'); } catch { S.results = {}; }
+      applyTheme();
+    }
+    function saveWords() { localStorage.setItem(KEYS.words, JSON.stringify(S.words)); }
+    function savePw(p) { S.pw = p; localStorage.setItem(KEYS.pw, p); }
+    function saveTheme() { localStorage.setItem(KEYS.theme, JSON.stringify(S.theme)); applyTheme(); }
+    function saveResults() { localStorage.setItem(KEYS.results, JSON.stringify(S.results)); }
+
+    function applyTheme() {
+      const r = document.documentElement.style;
+      r.setProperty('--primary', S.theme.primary);
+      r.setProperty('--primary-hover', shade(S.theme.primary, -20));
+      r.setProperty('--bg', S.theme.bg);
+      r.setProperty('--font-scale', S.theme.fontScale);
+      r.setProperty('--font-family', FONTS[S.theme.fontFamily] || FONTS.pretendard);
+    }
+    function shade(hex, amt) {
+      let c = hex.replace('#','');
+      if (c.length === 3) c = c[0]+c[0]+c[1]+c[1]+c[2]+c[2];
+      const n = parseInt(c, 16);
+      const clamp = (v) => Math.min(255, Math.max(0, v));
+      const R = clamp((n >> 16) + amt), G = clamp(((n >> 8) & 255) + amt), B = clamp((n & 255) + amt);
+      return '#' + ((R << 16) | (G << 8) | B).toString(16).padStart(6, '0');
+    }
+
+    function units() {
+      return [...new Set(S.words.map(w => w.unit || '기본'))].filter(Boolean).sort();
+    }
+    function wordsByUnit(u) {
+      if (!u || u === '전체') return S.words;
+      return S.words.filter(w => (w.unit || '기본') === u);
+    }
+
+    // Excel: sheet name = unit
+    // cols: 0 영단어, 1 품사, 2 한글뜻, 3 예문
+    function parseSheet(rows, unit) {
+      if (!rows?.length) return [];
+      let start = 0;
+      const first = (rows[0] || []).map(c => cell(c).toLowerCase());
+      const hints = ['영단어','word','english','품사','pos','한글','뜻','예문','example','sentence'];
+      if (first.some(h => hints.some(k => h.includes(k)))) start = 1;
+
+      const out = [];
+      for (let i = start; i < rows.length; i++) {
+        const r = rows[i] || [];
+        const en = cell(r[0]);
+        if (!en) continue;
+        out.push({
+          unit: unit || '기본',
+          en,
+          pos: cell(r[1]) || '',
+          ko: cell(r[2]) || '',
+          sentence: cell(r[3]) || ''
+        });
+      }
+      return out;
+    }
+
+    async function importExcel(file) {
+      S.busy = true; render();
+      try {
+        const buf = await file.arrayBuffer();
+        const wb = XLSX.read(buf, { type: 'array' });
+        const name = wb.SheetNames[0];
+        const rows = XLSX.utils.sheet_to_json(wb.Sheets[name], { header: 1, defval: '' });
+        const parsed = parseSheet(rows, name);
+        if (!parsed.length) {
+          alert('단어를 찾지 못했습니다.\n컬럼: 영단어 | 품사 | 한글 뜻 | 예문\n(단원 = 시트 이름)');
+          S.busy = false; render(); return;
+        }
+        parsed.forEach(w => {
+          S.words.push({ id: uid(), ...w });
+        });
+        saveWords();
+        alert(parsed.length + '개 단어가 추가되었습니다. (단원: ' + name + ')');
+      } catch (e) {
+        console.error(e);
+        alert('엑셀을 읽는 중 오류가 났습니다.');
+      }
+      S.busy = false; render();
+    }
+
+    // ---------- quiz ----------
+    function makeQuiz(n1, n2, n3, unit) {
+      const pool = wordsByUnit(unit);
+      if (!pool.length) return null;
+      const totalWanted = n1 + n2 + n3;
+      if (totalWanted <= 0) return null;
+
+      const qs = [];
+      const p = shuffle(pool);
+      let i = 0;
+
+      for (let k = 0; k < n1; k++) {
+        const w = p[i++ % p.length];
+        qs.push({ type: 1, en: w.en, correctPos: w.pos, correctKo: w.ko });
+      }
+      for (let k = 0; k < n2; k++) {
+        const w = p[i++ % p.length];
+        qs.push({ type: 2, ko: w.ko, pos: w.pos, correctEn: w.en });
+      }
+      for (let k = 0; k < n3; k++) {
+        const w = p[i++ % p.length];
+        let distractors = pool.filter(x => x.en !== w.en).map(x => x.en);
+        distractors = shuffle(distractors).slice(0, 4);
+        while (distractors.length < 4) distractors.push('???');
+        const options = shuffle([w.en, ...distractors]);
+        const sent = (w.sentence || ('Please use "' + w.en + '" here.'))
+          .replace(new RegExp('\\b' + w.en.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '\\b', 'gi'), '________');
+        qs.push({ type: 3, sentence: sent, options, correctEn: w.en });
+      }
+
+      return {
+        quizId: uid(),
+        unit: unit || '전체',
+        questions: shuffle(qs),
+        total: qs.length,
+        createdAt: new Date().toISOString()
+      };
+    }
+
+    function grade(q, ans) {
+      if (q.type === 1) {
+        return norm(ans.pos) === norm(q.correctPos) && meaningsMatch(ans.ko, q.correctKo);
+      }
+      if (q.type === 2) return norm(ans.en) === norm(q.correctEn);
+      if (q.type === 3) return norm(ans.selected) === norm(q.correctEn);
+      return false;
+    }
+
+    function buildResult() {
+      const details = S.answers.map((a, i) => ({
+        correct: a.correct,
+        userAns: a.userAns,
+        question: S.quiz.questions[i]
+      }));
+      const correctCount = details.filter(d => d.correct).length;
+      const score = Math.round(correctCount * (100 / S.quiz.total));
+      return {
+        resultId: uid(),
+        quizId: S.quiz.quizId,
+        unit: S.quiz.unit,
+        studentName: S.name || '학생',
+        score,
+        correctCount,
+        total: S.quiz.total,
+        details,
+        submittedAt: new Date().toISOString()
+      };
+    }
+
+    // ---------- render ----------
+    function render() {
+      const el = document.getElementById('app');
+      if (S.view === 'home') el.innerHTML = viewHome();
+      else if (S.view === 'teacher') el.innerHTML = viewTeacher();
+      else if (S.view === 'student') el.innerHTML = viewStudent();
+      else if (S.view === 'quiz') el.innerHTML = viewQuiz();
+      else if (S.view === 'result') el.innerHTML = viewResult();
+      else if (S.view === 'settings') el.innerHTML = viewSettings();
+      else if (S.view === 'results') el.innerHTML = viewResults();
+      bind();
+    }
+
+    function viewHome() {
+      return `
+        <div class="text-center mt-16 mb-10">
+          <h1 class="text-3xl sm:text-4xl font-bold tracking-tight" style="color:var(--primary)">리야샘의 Voca Sense</h1>
+        </div>
+        <div class="flex flex-col sm:flex-row gap-3 justify-center">
+          <button data-a="teacher" class="btn btn-primary px-8 py-3.5 text-base">리야샘 모드</button>
+          <button data-a="student" class="btn btn-secondary px-8 py-3.5 text-base">학생 모드</button>
+        </div>`;
+    }
+
+    function viewTeacher() {
+      const us = units();
+      const filter = S.unitFilter || '전체';
+      const list = wordsByUnit(filter);
+      const uOpts = ['전체', ...us].map(u =>
+        `<option value="${esc(u)}" ${u === filter ? 'selected' : ''}>${esc(u)}</option>`
+      ).join('');
+      const quizU = ['전체', ...us].map(u => `<option value="${esc(u)}">${esc(u)}</option>`).join('');
+
+      const rows = list.length ? list.map(w => `
+        <div class="flex gap-3 p-3 border-b last:border-0">
+          <div class="flex-1 min-w-0">
+            <div class="flex flex-wrap items-center gap-2">
+              <b style="color:var(--primary)">${esc(w.en)}</b>
+              <span class="badge">${esc(w.unit)}</span>
+            </div>
+            <div class="text-sm">${esc(w.ko)} <span style="color:var(--muted)">(${esc(w.pos)})</span></div>
+            <div class="text-xs truncate" style="color:var(--muted)">${esc(w.sentence) || '(예문 없음)'}</div>
+          </div>
+          <button data-a="del" data-id="${w.id}" class="text-red-500 text-sm shrink-0">삭제</button>
+        </div>`).join('')
+        : `<p class="text-center py-8" style="color:var(--muted)">등록된 단어가 없습니다.</p>`;
+
+      const rc = Object.values(S.results).reduce((s, a) => s + a.length, 0);
+
+      return `
+        <div class="flex flex-wrap items-center justify-between gap-2 mb-6">
+          <h2 class="text-xl font-bold">리야샘 모드</h2>
+          <div class="flex gap-2">
+            <button data-a="results" class="btn btn-secondary text-sm">결과 (${rc})</button>
+            <button data-a="settings" class="btn btn-secondary text-sm">설정</button>
+            <button data-a="home" class="btn btn-secondary text-sm">나가기</button>
+          </div>
+        </div>
+
+        <div class="card p-5 mb-5">
+          <h3 class="font-semibold mb-2">엑셀 업로드</h3>
+          <p class="text-sm mb-3" style="color:var(--muted)">시트 이름 = 단원 · 컬럼: 영단어 | 품사 | 한글 뜻 | 예문<br>한글 뜻이 여러 개면 ; 또는 / 로 구분 (예: 달리다;운영하다)</p>
+          <input type="file" id="xlsx" accept=".xlsx,.xls,.csv" class="hidden" />
+          <button data-a="xlsx" class="btn btn-primary" ${S.busy ? 'disabled' : ''}>${S.busy ? '불러오는 중…' : '엑셀 파일 업로드'}</button>
+        </div>
+
+        <div class="card p-5 mb-5">
+          <h3 class="font-semibold mb-3">직접 추가</h3>
+          <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
+            <div><label class="label">단원</label><input id="f-unit" class="input" list="dl-unit" placeholder="Unit 1" />
+              <datalist id="dl-unit">${us.map(u => `<option value="${esc(u)}">`).join('')}</datalist></div>
+            <div><label class="label">영단어</label><input id="f-en" class="input" placeholder="run" /></div>
+            <div><label class="label">품사</label><input id="f-pos" class="input" placeholder="v." /></div>
+            <div><label class="label">한글 뜻</label><input id="f-ko" class="input" placeholder="달리다;운영하다" /></div>
+            <div class="sm:col-span-2"><label class="label">예문</label><input id="f-sent" class="input" placeholder="I run every morning." /></div>
+          </div>
+          <button data-a="add" class="btn btn-primary mt-3">추가</button>
+        </div>
+
+        <div class="card p-5 mb-5">
+          <div class="flex flex-wrap items-center justify-between gap-2 mb-3">
+            <h3 class="font-semibold">단어 (${list.length})</h3>
+            <div class="flex items-center gap-2">
+              <select id="filter-unit" class="input py-1.5 w-auto text-sm">${uOpts}</select>
+              <button data-a="clear" class="text-sm text-red-500">전체 삭제</button>
+            </div>
+          </div>
+          <div class="max-h-56 overflow-y-auto">${rows}</div>
+        </div>
+
+        <div class="card p-5">
+          <h3 class="font-semibold mb-3">시험 만들기</h3>
+          <div class="mb-3">
+            <label class="label">단원</label>
+            <select id="q-unit" class="input">${quizU}</select>
+          </div>
+          <div class="grid grid-cols-3 gap-3 mb-4">
+            <div><label class="label">모드1 영→품사+뜻</label><input id="n1" type="number" min="0" value="4" class="input" /></div>
+            <div><label class="label">모드2 뜻+품사→영</label><input id="n2" type="number" min="0" value="3" class="input" /></div>
+            <div><label class="label">모드3 빈칸 5지선다</label><input id="n3" type="number" min="0" value="3" class="input" /></div>
+          </div>
+          <div class="flex flex-col sm:flex-row gap-2">
+            <button data-a="make" class="btn btn-primary flex-1">시험 링크 만들기</button>
+            <button data-a="preview" class="btn btn-secondary flex-1">미리보기</button>
+          </div>
+          <div id="share" class="mt-3 hidden">
+            <label class="label">학생에게 공유할 링크</label>
+            <div class="flex gap-2">
+              <input id="share-url" class="input text-sm" readonly />
+              <button data-a="copy" class="btn btn-success shrink-0">복사</button>
+            </div>
+          </div>
+        </div>`;
+    }
+
+    function viewStudent() {
+      return `
+        <div class="flex items-center justify-between mb-6">
+          <h2 class="text-xl font-bold">학생 모드</h2>
+          <button data-a="home" class="btn btn-secondary text-sm">홈</button>
+        </div>
+        <div class="card p-6">
+          <textarea id="paste" class="input h-28 text-sm" placeholder="선생님이 준 시험 링크 또는 코드를 붙여넣으세요"></textarea>
+          <button data-a="load" class="btn btn-primary w-full mt-3">시험 시작</button>
+        </div>`;
+    }
+
+    function viewQuiz() {
+      const q = S.quiz.questions[S.qi];
+      const prog = `${S.qi + 1} / ${S.quiz.total}`;
+      const pct = Math.round((S.qi / S.quiz.total) * 100);
+      let body = '';
+
+      if (q.type === 1) {
+        body = `
+          <div class="text-center mb-5">
+            <div class="text-sm mb-1" style="color:var(--muted)">품사와 한글 뜻을 쓰세요</div>
+            <div class="text-3xl font-bold" style="color:var(--primary)">${esc(q.en)}</div>
+            <div class="text-xs mt-2" style="color:var(--muted)">뜻이 여러 개면 모두 적으세요 (; 또는 / 로 구분)</div>
+          </div>
+          <div class="space-y-3">
+            <div><label class="label">품사</label><input id="a-pos" class="input text-lg" autocomplete="off" /></div>
+            <div><label class="label">한글 뜻</label><input id="a-ko" class="input text-lg" autocomplete="off" /></div>
+          </div>`;
+      } else if (q.type === 2) {
+        body = `
+          <div class="text-center mb-5">
+            <div class="text-sm mb-1" style="color:var(--muted)">영단어를 쓰세요</div>
+            <div class="text-2xl font-bold" style="color:var(--primary)">${esc(q.ko)}</div>
+            <div class="text-sm mt-1" style="color:var(--muted)">(${esc(q.pos)})</div>
+          </div>
+          <div><label class="label">영단어</label><input id="a-en" class="input text-lg" autocomplete="off" /></div>`;
+      } else {
+        body = `
+          <div class="mb-5">
+            <div class="text-sm mb-2" style="color:var(--muted)">빈칸에 알맞은 단어를 고르세요</div>
+            <div class="text-lg leading-relaxed p-4 rounded-xl border bg-slate-50">${esc(q.sentence)}</div>
+          </div>
+          <div class="grid gap-2">
+            ${q.options.map((o, i) => `
+              <button type="button" class="opt" data-opt="${esc(o)}">
+                <span style="color:var(--muted)">${i + 1}.</span> ${esc(o)}
+              </button>`).join('')}
+          </div>`;
+      }
+
+      return `
+        <div class="mb-4">
+          <div class="flex justify-between text-sm mb-1" style="color:var(--muted)">
+            <span>${prog}</span><span>${esc(S.name)}</span>
+          </div>
+          <div class="w-full bg-slate-200 rounded-full h-2">
+            <div class="h-2 rounded-full" style="width:${pct}%;background:var(--primary)"></div>
+          </div>
+        </div>
+        <div class="card p-6">
+          ${body}
+          <button data-a="next" class="btn btn-primary w-full mt-6 py-3 text-lg">
+            ${S.qi + 1 === S.quiz.total ? '제출' : '다음'}
+          </button>
+        </div>`;
+    }
+
+    function viewResult() {
+      const r = S.result;
+      const details = r.details.map((d, i) => {
+        const q = d.question;
+        let qtxt = '', utxt = '', ctxt = '';
+        if (q.type === 1) {
+          qtxt = `영단어: <b>${esc(q.en)}</b>`;
+          utxt = `내 답: ${esc(d.userAns.pos)} / ${esc(d.userAns.ko)}`;
+          ctxt = `정답: ${esc(q.correctPos)} / ${esc(q.correctKo)}`;
+        } else if (q.type === 2) {
+          qtxt = `뜻: <b>${esc(q.ko)}</b> (${esc(q.pos)})`;
+          utxt = `내 답: ${esc(d.userAns.en)}`;
+          ctxt = `정답: ${esc(q.correctEn)}`;
+        } else {
+          qtxt = `빈칸: ${esc(q.sentence)}`;
+          utxt = `내 선택: ${esc(d.userAns.selected)}`;
+          ctxt = `정답: ${esc(q.correctEn)}`;
+        }
+        const bg = d.correct ? 'bg-emerald-50' : 'bg-red-50';
+        return `<div class="p-3 rounded-xl mb-2 ${bg}">
+          <div class="font-medium">${d.correct ? '✅' : '❌'} ${i + 1}. ${qtxt}</div>
+          <div class="text-sm mt-1">${utxt}</div>
+          ${!d.correct ? `<div class="text-sm text-emerald-700">${ctxt}</div>` : ''}
+        </div>`;
+      }).join('');
+
+      return `
+        <div class="text-center pt-4 mb-6">
+          <h2 class="text-xl font-bold mb-1">${esc(r.studentName)} 결과</h2>
+          <div class="text-5xl font-bold my-4" style="color:var(--primary)">${r.score}<span class="text-xl" style="color:var(--muted)">/100</span></div>
+          <p style="color:var(--muted)">${r.correctCount} / ${r.total} 정답</p>
+        </div>
+        <div class="card p-5 mb-4 max-h-80 overflow-y-auto">
+          <h3 class="font-semibold mb-3">문제별 결과</h3>
+          ${details}
+        </div>
+        <div class="card p-5 mb-4">
+          <h3 class="font-semibold mb-2">결과 코드</h3>
+          <p class="text-sm mb-2" style="color:var(--muted)">선생님께 제출하세요</p>
+          <textarea id="rcode" class="input text-xs h-20" readonly>${encode(r)}</textarea>
+          <button data-a="copy-result" class="btn btn-success w-full mt-2">결과 코드 복사</button>
+        </div>
+        <button data-a="home" class="btn btn-primary w-full">홈</button>`;
+    }
+
+    function viewSettings() {
+      return `
+        <div class="flex items-center justify-between mb-6">
+          <h2 class="text-xl font-bold">설정</h2>
+          <button data-a="back" class="btn btn-secondary text-sm">돌아가기</button>
+        </div>
+        <div class="card p-5 mb-5">
+          <h3 class="font-semibold mb-3">비밀번호 변경</h3>
+          <div class="space-y-3">
+            <div><label class="label">현재</label><input id="pw0" type="password" class="input" /></div>
+            <div><label class="label">새 비밀번호</label><input id="pw1" type="password" class="input" /></div>
+            <div><label class="label">확인</label><input id="pw2" type="password" class="input" /></div>
+            <button data-a="pw" class="btn btn-primary">변경</button>
+          </div>
+        </div>
+        <div class="card p-5">
+          <h3 class="font-semibold mb-3">색상 · 글자 · 폰트</h3>
+          <div class="space-y-4">
+            <div>
+              <label class="label">메인 색</label>
+              <input id="t-primary" type="color" value="${S.theme.primary}" class="w-12 h-10 rounded border-0 cursor-pointer" />
+            </div>
+            <div>
+              <label class="label">배경 색</label>
+              <input id="t-bg" type="color" value="${S.theme.bg}" class="w-12 h-10 rounded border-0 cursor-pointer" />
+            </div>
+            <div>
+              <label class="label">글자 크기 (${Math.round(S.theme.fontScale * 100)}%)</label>
+              <input id="t-scale" type="range" min="0.85" max="1.3" step="0.05" value="${S.theme.fontScale}" class="w-full" />
+            </div>
+            <div>
+              <label class="label">폰트</label>
+              <select id="t-font" class="input">
+                <option value="pretendard" ${S.theme.fontFamily==='pretendard'?'selected':''}>Pretendard</option>
+                <option value="noto" ${S.theme.fontFamily==='noto'?'selected':''}>Noto Sans KR</option>
+                <option value="system" ${S.theme.fontFamily==='system'?'selected':''}>시스템</option>
+              </select>
+            </div>
+            <div class="flex gap-2">
+              <button data-a="theme" class="btn btn-primary">적용</button>
+              <button data-a="theme-reset" class="btn btn-secondary">기본값</button>
+            </div>
+          </div>
+        </div>`;
+    }
+
+    function viewResults() {
+      let all = [];
+      Object.entries(S.results).forEach(([qid, list]) => {
+        list.forEach(r => all.push({ ...r, quizId: qid }));
+      });
+      all.sort((a, b) => new Date(b.submittedAt) - new Date(a.submittedAt));
+
+      const list = all.length ? all.map(r => `
+        <div class="flex items-center justify-between p-3 border-b last:border-0">
+          <div>
+            <div class="font-medium">${esc(r.studentName)} <span style="color:var(--primary)">${r.score}점</span></div>
+            <div class="text-xs" style="color:var(--muted)">${new Date(r.submittedAt).toLocaleString('ko-KR')} · ${esc(r.unit || '')} · ${r.correctCount}/${r.total}</div>
+          </div>
+          <div class="flex gap-2">
+            <button data-a="view-r" data-id="${r.resultId}" class="btn btn-secondary text-sm">상세</button>
+            <button data-a="del-r" data-id="${r.resultId}" data-q="${r.quizId}" class="text-red-500 text-sm">삭제</button>
+          </div>
+        </div>`).join('')
+        : `<p class="text-center py-8" style="color:var(--muted)">결과가 없습니다.</p>`;
+
+      return `
+        <div class="flex items-center justify-between mb-6">
+          <h2 class="text-xl font-bold">결과 관리</h2>
+          <button data-a="back" class="btn btn-secondary text-sm">돌아가기</button>
+        </div>
+        <div class="card p-5 mb-5">
+          <h3 class="font-semibold mb-2">결과 코드 추가</h3>
+          <textarea id="paste-r" class="input h-20 text-sm" placeholder="학생이 준 결과 코드"></textarea>
+          <button data-a="add-r" class="btn btn-primary mt-2">추가</button>
+        </div>
+        <div class="card p-5">
+          <h3 class="font-semibold mb-3">수집된 결과 (${all.length})</h3>
+          <div class="max-h-96 overflow-y-auto">${list}</div>
+        </div>
+        <div id="modal" class="hidden fixed inset-0 bg-black/40 z-50 flex items-center justify-center p-4">
+          <div class="card p-6 max-w-lg w-full max-h-[80vh] overflow-y-auto">
+            <div id="modal-body"></div>
+            <button data-a="close-m" class="btn btn-secondary w-full mt-4">닫기</button>
+          </div>
+        </div>`;
+    }
+
+    // ---------- events ----------
+    function bind() {
+      document.querySelectorAll('[data-a]').forEach(el => el.addEventListener('click', onAction));
+      document.querySelectorAll('.opt').forEach(btn => {
+        btn.addEventListener('click', () => {
+          document.querySelectorAll('.opt').forEach(b => b.classList.remove('on'));
+          btn.classList.add('on');
+        });
+      });
+      const fu = document.getElementById('filter-unit');
+      if (fu) fu.addEventListener('change', () => { S.unitFilter = fu.value; render(); });
+      const x = document.getElementById('xlsx');
+      if (x) x.addEventListener('change', async e => {
+        const f = e.target.files?.[0];
+        if (f) await importExcel(f);
+      });
+    }
+
+    function startQuiz(quiz) {
+      const name = prompt('이름', '') || '학생';
+      S.name = name;
+      S.quiz = quiz;
+      S.qi = 0;
+      S.answers = [];
+      S.result = null;
+      S.view = 'quiz';
+      render();
+    }
+
+    function onAction(e) {
+      const a = e.currentTarget.dataset.a;
+
+      if (a === 'home') {
+        S.view = 'home'; S.quiz = null; S.answers = []; S.result = null; render(); return;
+      }
+      if (a === 'teacher') {
+        const pw = prompt('리야샘 비밀번호');
+        if (pw === S.pw) { S.view = 'teacher'; render(); }
+        else if (pw !== null) alert('비밀번호가 틀렸습니다.');
+        return;
+      }
+      if (a === 'student') { S.view = 'student'; render(); return; }
+      if (a === 'settings') { S.view = 'settings'; render(); return; }
+      if (a === 'results') { S.view = 'results'; render(); return; }
+      if (a === 'back') { S.view = 'teacher'; render(); return; }
+
+      if (a === 'xlsx') { document.getElementById('xlsx').click(); return; }
+
+      if (a === 'add') {
+        const unit = document.getElementById('f-unit').value.trim() || '기본';
+        const en = document.getElementById('f-en').value.trim();
+        const pos = document.getElementById('f-pos').value.trim();
+        const ko = document.getElementById('f-ko').value.trim();
+        const sentence = document.getElementById('f-sent').value.trim();
+        if (!en || !pos || !ko) { alert('영단어, 품사, 한글 뜻은 필수입니다.'); return; }
+        S.words.push({ id: uid(), unit, en, pos, ko, sentence });
+        saveWords(); render(); return;
+      }
+
+      if (a === 'del') {
+        if (!confirm('삭제할까요?')) return;
+        S.words = S.words.filter(w => w.id !== e.currentTarget.dataset.id);
+        saveWords(); render(); return;
+      }
+      if (a === 'clear') {
+        if (!confirm('모든 단어를 삭제할까요?')) return;
+        S.words = []; saveWords(); render(); return;
+      }
+
+      if (a === 'make' || a === 'preview') {
+        const n1 = parseInt(document.getElementById('n1').value) || 0;
+        const n2 = parseInt(document.getElementById('n2').value) || 0;
+        const n3 = parseInt(document.getElementById('n3').value) || 0;
+        const unit = document.getElementById('q-unit').value;
+        if (n1 + n2 + n3 <= 0) { alert('문제를 1개 이상 설정하세요.'); return; }
+        if (!wordsByUnit(unit).length) { alert('선택한 단원에 단어가 없습니다.'); return; }
+        const quiz = makeQuiz(n1, n2, n3, unit);
+        if (!quiz) { alert('시험을 만들 수 없습니다.'); return; }
+        if (a === 'preview') { startQuiz(quiz); return; }
+        const url = location.origin + location.pathname + '?quiz=' + encode(quiz);
+        document.getElementById('share').classList.remove('hidden');
+        document.getElementById('share-url').value = url;
+        return;
+      }
+
+      if (a === 'copy') {
+        const v = document.getElementById('share-url').value;
+        navigator.clipboard.writeText(v).then(() => alert('복사되었습니다.')).catch(() => alert('복사 실패'));
+        return;
+      }
+
+      if (a === 'load') {
+        let t = document.getElementById('paste').value.trim();
+        if (!t) return;
+        let code = t;
+        try { code = new URL(t).searchParams.get('quiz') || t; } catch {}
+        const quiz = decode(code);
+        if (!quiz?.questions) { alert('올바른 시험 코드가 아닙니다.'); return; }
+        startQuiz(quiz); return;
+      }
+
+      if (a === 'next') {
+        const q = S.quiz.questions[S.qi];
+        let ans = {}, ok = true;
+        if (q.type === 1) {
+          ans.pos = document.getElementById('a-pos').value;
+          ans.ko = document.getElementById('a-ko').value;
+          if (!ans.pos.trim() || !ans.ko.trim()) ok = false;
+        } else if (q.type === 2) {
+          ans.en = document.getElementById('a-en').value;
+          if (!ans.en.trim()) ok = false;
+        } else {
+          const sel = document.querySelector('.opt.on');
+          if (!sel) ok = false;
+          else ans.selected = sel.dataset.opt;
+        }
+        if (!ok) { alert('답을 입력하세요.'); return; }
+        S.answers.push({ userAns: ans, correct: grade(q, ans) });
+        if (S.qi + 1 >= S.quiz.total) {
+          S.result = buildResult();
+          if (!S.results[S.result.quizId]) S.results[S.result.quizId] = [];
+          S.results[S.result.quizId].push(S.result);
+          saveResults();
+          S.view = 'result';
+        } else S.qi++;
+        render(); return;
+      }
+
+      if (a === 'copy-result') {
+        const v = document.getElementById('rcode').value;
+        navigator.clipboard.writeText(v).then(() => alert('복사되었습니다.')).catch(() => alert('복사 실패'));
+        return;
+      }
+
+      if (a === 'pw') {
+        const c = document.getElementById('pw0').value;
+        const n = document.getElementById('pw1').value;
+        const n2 = document.getElementById('pw2').value;
+        if (c !== S.pw) { alert('현재 비밀번호가 틀렸습니다.'); return; }
+        if (!n || n.length < 3) { alert('새 비밀번호는 3자 이상'); return; }
+        if (n !== n2) { alert('비밀번호가 일치하지 않습니다.'); return; }
+        savePw(n); alert('변경되었습니다.'); S.view = 'teacher'; render(); return;
+      }
+
+      if (a === 'theme') {
+        S.theme.primary = document.getElementById('t-primary').value;
+        S.theme.bg = document.getElementById('t-bg').value;
+        S.theme.fontScale = parseFloat(document.getElementById('t-scale').value);
+        S.theme.fontFamily = document.getElementById('t-font').value;
+        saveTheme(); alert('적용되었습니다.'); render(); return;
+      }
+      if (a === 'theme-reset') {
+        S.theme = { primary: '#4f46e5', bg: '#f8fafc', fontScale: 1, fontFamily: 'pretendard' };
+        saveTheme(); render(); return;
+      }
+
+      if (a === 'add-r') {
+        const code = document.getElementById('paste-r').value.trim();
+        if (!code) return;
+        const r = decode(code);
+        if (!r?.resultId || !r.details) { alert('올바른 결과 코드가 아닙니다.'); return; }
+        if (!S.results[r.quizId]) S.results[r.quizId] = [];
+        if (S.results[r.quizId].some(x => x.resultId === r.resultId)) { alert('이미 추가된 결과입니다.'); return; }
+        S.results[r.quizId].push(r); saveResults();
+        alert(`${r.studentName} · ${r.score}점 추가`); render(); return;
+      }
+
+      if (a === 'view-r') {
+        let found = null;
+        Object.values(S.results).forEach(list => {
+          const r = list.find(x => x.resultId === e.currentTarget.dataset.id);
+          if (r) found = r;
+        });
+        if (!found) return;
+        const html = found.details.map((d, i) => {
+          const q = d.question;
+          let qtxt = '', utxt = '', ctxt = '';
+          if (q.type === 1) {
+            qtxt = `영단어: <b>${esc(q.en)}</b>`;
+            utxt = `학생: ${esc(d.userAns.pos)} / ${esc(d.userAns.ko)}`;
+            ctxt = `정답: ${esc(q.correctPos)} / ${esc(q.correctKo)}`;
+          } else if (q.type === 2) {
+            qtxt = `뜻: <b>${esc(q.ko)}</b> (${esc(q.pos)})`;
+            utxt = `학생: ${esc(d.userAns.en)}`;
+            ctxt = `정답: ${esc(q.correctEn)}`;
+          } else {
+            qtxt = `빈칸: ${esc(q.sentence)}`;
+            utxt = `학생: ${esc(d.userAns.selected)}`;
+            ctxt = `정답: ${esc(q.correctEn)}`;
+          }
+          return `<div class="p-2 mb-1 rounded ${d.correct ? 'bg-emerald-50' : 'bg-red-50'}">
+            <div>${d.correct ? '✅' : '❌'} ${i + 1}. ${qtxt}</div>
+            <div class="text-sm">${utxt}</div>
+            ${!d.correct ? `<div class="text-sm text-emerald-700">${ctxt}</div>` : ''}
+          </div>`;
+        }).join('');
+        document.getElementById('modal-body').innerHTML =
+          `<h3 class="font-bold text-lg mb-1">${esc(found.studentName)} · ${found.score}점</h3>
+           <p class="text-sm mb-3" style="color:var(--muted)">${found.correctCount}/${found.total} · ${new Date(found.submittedAt).toLocaleString('ko-KR')}</p>${html}`;
+        document.getElementById('modal').classList.remove('hidden');
+        return;
+      }
+      if (a === 'close-m') { document.getElementById('modal').classList.add('hidden'); return; }
+      if (a === 'del-r') {
+        if (!confirm('삭제할까요?')) return;
+        const id = e.currentTarget.dataset.id, qid = e.currentTarget.dataset.q;
+        S.results[qid] = S.results[qid].filter(r => r.resultId !== id);
+        if (!S.results[qid].length) delete S.results[qid];
+        saveResults(); render(); return;
+      }
+    }
+
+    function init() {
+      load();
+      const code = new URLSearchParams(location.search).get('quiz');
+      if (code) {
+        const quiz = decode(code);
+        if (quiz?.questions) { startQuiz(quiz); return; }
+      }
+      render();
+    }
+    init();
+  </script>
+</body>
+</html>
